@@ -1,5 +1,6 @@
 #include "bitboard.h"
 #include "board.h"
+#include "eval.h"
 #include <iostream>
 
 int main() {
@@ -54,6 +55,39 @@ int main() {
     print_bb(diag & wb);
 
     std::cout << "in_check: " << b.in_check() << "\n";
+
+    // ── Evaluation sanity checks ──────────────────────────────────────────
+    std::cout << "\n=== Evaluation Tests ===\n";
+
+    // Startpos (White to move)
+    Board b1;
+    b1.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    int score1 = evaluate(b1);
+    std::cout << "Startpos:           " << score1 << " cp (expected ≈ 0)\n";
+
+    // Same position, Black to move — should flip sign
+    Board b1b;
+    b1b.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
+    int score1b = evaluate(b1b);
+    std::cout << "Startpos (black):   " << score1b << " cp (expected ≈ 0)\n";
+
+    // Missing white rook (a1)
+    Board b2;
+    b2.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/1NBQKBNR w KQkq - 0 1");
+    int score2 = evaluate(b2);
+    std::cout << "White rook missing: " << score2 << " cp (expected ≈ -500)\n";
+
+    // Missing black queen
+    Board b3;
+    b3.set_from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    int score3 = evaluate(b3);
+    std::cout << "Black queen missing:" << score3 << " cp (expected ≈ +900)\n";
+
+    // Missing both knights for white
+    Board b4;
+    b4.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/R1BQKB1R w KQkq - 0 1");
+    int score4 = evaluate(b4);
+    std::cout << "White knights gone: " << score4 << " cp (expected ≈ -640)\n";
 
     return 0;
 }

@@ -14,9 +14,6 @@ static uint64_t perft(Board &b, int depth) {
 
   Move list[256];
   int count = MoveGen::generate(b, list);
-  for (int i = 0; i < count; ++i)
-    std::cout << list[i].to_string() << "\n";
-  std::cout << "Total: " << count << "\n";
   uint64_t nodes = 0;
 
   for (int i = 0; i < count; ++i) {

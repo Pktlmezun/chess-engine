@@ -11,6 +11,7 @@ set(ENGINE_SOURCES
     src/bitboard.cpp
     src/board.cpp
     src/movegen.cpp
+    src/eval.cpp
 )
 
 add_executable(chess_engine src/main.cpp ${ENGINE_SOURCES})
