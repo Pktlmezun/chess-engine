@@ -1,6 +1,8 @@
 #include "bitboard.h"
 #include "board.h"
 #include "eval.h"
+#include "search.h"
+#include "movegen.h"
 #include <iostream>
 
 int main() {
@@ -88,6 +90,14 @@ int main() {
     b4.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/R1BQKB1R w KQkq - 0 1");
     int score4 = evaluate(b4);
     std::cout << "White knights gone: " << score4 << " cp (expected ≈ -640)\n";
+
+    // ── Search test: Mate in 1 (Qxf7#) ────────────────────────────────────
+    std::cout << "\n=== Search Test: Mate in 1 (Qxf7#) ===\n";
+    Board mate;
+    mate.set_from_fen("r1bqkb1r/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq -");
+    mate.display();
+    std::cout << "Searching...\n";
+    Search::go(mate, 2);
 
     return 0;
 }

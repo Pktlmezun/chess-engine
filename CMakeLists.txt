@@ -12,6 +12,7 @@ set(ENGINE_SOURCES
     src/board.cpp
     src/movegen.cpp
     src/eval.cpp
+    src/search.cpp
 )
 
 add_executable(chess_engine src/main.cpp ${ENGINE_SOURCES})
