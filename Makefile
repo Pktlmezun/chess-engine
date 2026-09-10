@@ -206,6 +206,33 @@ src/board.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/board.cpp.s
 .PHONY : src/board.cpp.s
 
+src/eval.o: src/eval.cpp.o
+.PHONY : src/eval.o
+
+# target to build an object file
+src/eval.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/eval.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/eval.cpp.o
+.PHONY : src/eval.cpp.o
+
+src/eval.i: src/eval.cpp.i
+.PHONY : src/eval.i
+
+# target to preprocess a source file
+src/eval.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/eval.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/eval.cpp.i
+.PHONY : src/eval.cpp.i
+
+src/eval.s: src/eval.cpp.s
+.PHONY : src/eval.s
+
+# target to generate assembly for a file
+src/eval.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/eval.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/eval.cpp.s
+.PHONY : src/eval.cpp.s
+
 src/main.o: src/main.cpp.o
 .PHONY : src/main.o
 
@@ -257,6 +284,60 @@ src/movegen.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/movegen.cpp.s
 .PHONY : src/movegen.cpp.s
 
+src/search.o: src/search.cpp.o
+.PHONY : src/search.o
+
+# target to build an object file
+src/search.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/search.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/search.cpp.o
+.PHONY : src/search.cpp.o
+
+src/search.i: src/search.cpp.i
+.PHONY : src/search.i
+
+# target to preprocess a source file
+src/search.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/search.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/search.cpp.i
+.PHONY : src/search.cpp.i
+
+src/search.s: src/search.cpp.s
+.PHONY : src/search.s
+
+# target to generate assembly for a file
+src/search.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/search.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/search.cpp.s
+.PHONY : src/search.cpp.s
+
+src/uci.o: src/uci.cpp.o
+.PHONY : src/uci.o
+
+# target to build an object file
+src/uci.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/uci.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/uci.cpp.o
+.PHONY : src/uci.cpp.o
+
+src/uci.i: src/uci.cpp.i
+.PHONY : src/uci.i
+
+# target to preprocess a source file
+src/uci.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/uci.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/uci.cpp.i
+.PHONY : src/uci.cpp.i
+
+src/uci.s: src/uci.cpp.s
+.PHONY : src/uci.s
+
+# target to generate assembly for a file
+src/uci.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chess_engine.dir/build.make CMakeFiles/chess_engine.dir/src/uci.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/perft.dir/build.make CMakeFiles/perft.dir/src/uci.cpp.s
+.PHONY : src/uci.cpp.s
+
 tests/perft_test.o: tests/perft_test.cpp.o
 .PHONY : tests/perft_test.o
 
@@ -298,12 +379,21 @@ help:
 	@echo "... src/board.o"
 	@echo "... src/board.i"
 	@echo "... src/board.s"
+	@echo "... src/eval.o"
+	@echo "... src/eval.i"
+	@echo "... src/eval.s"
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"
 	@echo "... src/movegen.o"
 	@echo "... src/movegen.i"
 	@echo "... src/movegen.s"
+	@echo "... src/search.o"
+	@echo "... src/search.i"
+	@echo "... src/search.s"
+	@echo "... src/uci.o"
+	@echo "... src/uci.i"
+	@echo "... src/uci.s"
 	@echo "... tests/perft_test.o"
 	@echo "... tests/perft_test.i"
 	@echo "... tests/perft_test.s"

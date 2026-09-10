@@ -5,6 +5,19 @@
 #include <algorithm>
 #include <cstring>
 
+// Insertion sort — faster than std::sort for small arrays (chess move lists)
+static void insertion_sort(ScoredMove* begin, ScoredMove* end) {
+    for (ScoredMove* i = begin + 1; i < end; ++i) {
+        ScoredMove key = *i;
+        ScoredMove* j = i - 1;
+        while (j >= begin && j->score < key.score) {
+            *(j + 1) = *j;
+            --j;
+        }
+        *(j + 1) = key;
+    }
+}
+
 constexpr int MATE_SCORE    = SCORE_MATE;           // 999000
 constexpr int MATE_THRESHOLD = SCORE_MATE / 2;      // 499500
 
@@ -168,8 +181,7 @@ int Search::quiescence(Board& b, int alpha, int beta, int ply) {
             scored[i].score = PieceValue[type_of(victim)] * 10 - PieceValue[type_of(attacker)];
     }
 
-    std::sort(scored, scored + count,
-        [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
+    insertion_sort(scored, scored + count);
 
     for (int i = 0; i < count; ++i) {
         b.make_move(scored[i].move);
@@ -285,8 +297,7 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
         }
     }
 
-    std::sort(scored, scored + count,
-        [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
+    insertion_sort(scored, scored + count);
 
     int moves_searched = 0;
 
