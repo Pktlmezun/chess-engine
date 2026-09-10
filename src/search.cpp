@@ -22,6 +22,49 @@ SearchLimits Search::limits{};
 std::chrono::steady_clock::time_point Search::search_start{};
 Move     Search::killer_moves[MAX_PLY][2];
 int      Search::history[COLOR_NB][64][64];
+TranspositionTable Search::tt;
+
+// ── Transposition Table implementation ───────────────────────────────────────
+
+void TranspositionTable::resize(size_t mb) {
+    size_t bytes = mb * 1024 * 1024;
+    size_t entries = bytes / sizeof(TTEntry);
+    // Round down to power of 2 for fast modulo
+    mask = 1;
+    while (mask * 2 <= entries) mask *= 2;
+    table.resize(mask + 1);
+    clear();
+}
+
+void TranspositionTable::clear() {
+    std::fill(table.begin(), table.end(), TTEntry{});
+    current_age = 0;
+}
+
+bool TranspositionTable::probe(uint64_t key, TTEntry& entry) const {
+    entry = table[key & mask];
+    return entry.key == key;
+}
+
+void TranspositionTable::store(uint64_t key, Move best_move, int depth, int score, TTFlag flag) {
+    size_t idx = key & mask;
+    TTEntry& existing = table[idx];
+
+    // Replacement strategy: always replace if different position,
+    // or if same position but we have equal or greater depth,
+    // or if the entry is from an old search
+    if (existing.key != key
+        || existing.age < current_age
+        || depth >= existing.depth)
+    {
+        existing.key       = key;
+        existing.best_move = best_move;
+        existing.depth     = static_cast<int16_t>(depth);
+        existing.score     = static_cast<int16_t>(score);
+        existing.flag      = static_cast<uint8_t>(flag);
+        existing.age       = current_age;
+    }
+}
 
 int64_t Search::alloc_time_ms(Color side, int game_ply) {
     if (limits.movetime > 0)
@@ -68,14 +111,16 @@ void Search::update_history(Color c, Move m, int depth) {
 }
 
 int Search::score_move(const Board& b, Move m, int ply) {
-    if (m.type() == EN_PASSANT) return KILLER_SCORE - 1;
-
-    Piece victim   = b.piece_on(m.to());
+    // MVV-LVA captures first — queen captures must outrank en passant
+    Piece victim = b.piece_on(m.to());
     if (victim != NO_PIECE)
-        return PieceValue[type_of(victim)] * 10 - PieceValue[type_of(b.piece_on(m.from()))];
+        return 10000 + PieceValue[type_of(victim)] * 10 - PieceValue[type_of(b.piece_on(m.from()))];
+
+    if (m.type() == EN_PASSANT)
+        return 8000 + PieceValue[PAWN] * 10 - PieceValue[PAWN];
 
     if (m.type() == PROMOTION)
-        return KILLER_SCORE - 2 + int(m.promotion());
+        return 9000 + PieceValue[m.promotion()];
 
     if (ply < MAX_PLY) {
         if (m == killer_moves[ply][0]) return KILLER_SCORE;
@@ -153,8 +198,71 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
     if ((nodes & 2047) == 0 && stopped.load(std::memory_order_relaxed))
         return 0;
 
-    if (depth == 0)
+    // Draw detection
+    if (ply > 0 && b.rule50() >= 100)
+        return 0;
+
+    bool is_root = (ply == 0);
+    bool in_check = b.in_check();
+
+    // Check extension: search one ply deeper when in check
+    if (in_check) depth++;
+
+    if (depth <= 0)
         return quiescence(b, alpha, beta, ply);
+
+    // ── TT probe ──────────────────────────────────────────────────────────
+    TTEntry tt_entry;
+    Move tt_move = Move::null();
+    bool tt_hit = tt.probe(b.hash(), tt_entry);
+    if (tt_hit) {
+        tt_move = tt_entry.best_move;
+        if (!is_root) {
+            int tt_score = tt_entry.score;
+            // Adjust mate scores for ply distance
+            if (tt_score > MATE_THRESHOLD) tt_score -= ply;
+            else if (tt_score < -MATE_THRESHOLD) tt_score += ply;
+
+            if (tt_entry.depth >= depth) {
+                if (tt_entry.flag == TT_EXACT)
+                    return tt_score;
+                if (tt_entry.flag == TT_ALPHA && tt_score <= alpha)
+                    return alpha;
+                if (tt_entry.flag == TT_BETA && tt_score >= beta)
+                    return beta;
+            }
+        }
+    }
+
+    // ── Null Move Pruning ─────────────────────────────────────────────────
+    // Skip our turn; if we're still winning with depth reduced, prune.
+    if (!is_root && !in_check && depth >= 3 && ply > 0) {
+        // Evaluate static position — if already >= beta, skip null move
+        int eval = evaluate(b);
+        if (eval >= beta) {
+            int R = 3;
+            // Temporarily flip side, clear EP
+            Color orig_side = b.side_to_move;
+            Square orig_ep = b.ep_square();
+            b.side_to_move = ~orig_side;
+            b.state_stack[b.state_idx].ep_square = SQ_NONE;
+            b.state_stack[b.state_idx].hash ^= Board::ZobristSide;
+            if (orig_ep != SQ_NONE)
+                b.state_stack[b.state_idx].hash ^= Board::ZobristEP[file_of(orig_ep)];
+
+            int null_score = -negamax(b, depth - 1 - R, -beta, -beta + 1, ply + 1, info);
+
+            // Restore
+            b.state_stack[b.state_idx].hash ^= Board::ZobristSide;
+            b.side_to_move = orig_side;
+            b.state_stack[b.state_idx].ep_square = orig_ep;
+            if (orig_ep != SQ_NONE)
+                b.state_stack[b.state_idx].hash ^= Board::ZobristEP[file_of(orig_ep)];
+
+            if (null_score >= beta)
+                return beta;
+        }
+    }
 
     Move list[256];
     int count = MoveGen::generate(b, list);
@@ -167,8 +275,20 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
     for (int i = 0; i < count; ++i)
         scored[i] = { list[i], score_move(b, list[i], ply) };
 
+    // If we have a TT move, promote it to the front
+    if (!tt_move.is_null()) {
+        for (int i = 0; i < count; ++i) {
+            if (scored[i].move == tt_move) {
+                scored[i].score += 10000000;  // ensure TT move is searched first
+                break;
+            }
+        }
+    }
+
     std::sort(scored, scored + count,
         [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
+
+    int moves_searched = 0;
 
     for (int i = 0; i < count; ++i) {
         b.make_move(scored[i].move);
@@ -178,9 +298,50 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
             continue;
         }
 
-        int score = -negamax(b, depth - 1, -beta, -alpha, ply + 1, info);
+        // ── Futility Pruning ──────────────────────────────────────────────
+        // At low depth, skip quiet moves if eval + margin is below alpha.
+        if (depth <= 3 && moves_searched > 0 && !in_check
+            && scored[i].move.type() != PROMOTION
+            && b.piece_on(scored[i].move.to()) == NO_PIECE)
+        {
+            int futility_margin = 200 * depth;
+            int futility_eval = evaluate(b);
+            // Note: evaluate returns from side-to-move perspective (opponent after make_move)
+            // so we negate to get our perspective
+            if (-futility_eval + futility_margin < alpha) {
+                b.unmake_move(scored[i].move);
+                ++moves_searched;
+                continue;
+            }
+        }
+
+        int score;
+
+        // Late Move Reductions: reduce depth for moves sorted late that aren't tactical
+        if (moves_searched >= 4 && depth >= 3 && !in_check
+            && scored[i].move.type() != PROMOTION
+            && b.piece_on(scored[i].move.to()) == NO_PIECE
+            && !b.is_attacked(b.king_square(b.side_to_move), ~b.side_to_move))
+        {
+            score = -negamax(b, depth - 2, -alpha - 1, -alpha, ply + 1, info);
+            if (score <= alpha) {
+                b.unmake_move(scored[i].move);
+                ++moves_searched;
+                continue;
+            }
+        }
+
+        // PVS: full window for first move, zero window for rest
+        if (moves_searched == 0) {
+            score = -negamax(b, depth - 1, -beta, -alpha, ply + 1, info);
+        } else {
+            score = -negamax(b, depth - 1, -alpha - 1, -alpha, ply + 1, info);
+            if (score > alpha && score < beta)
+                score = -negamax(b, depth - 1, -beta, -alpha, ply + 1, info);
+        }
 
         b.unmake_move(scored[i].move);
+        ++moves_searched;
 
         if (score >= beta) {
             if (scored[i].move.type() != EN_PASSANT
@@ -189,6 +350,8 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
                 update_killers(scored[i].move, ply);
                 update_history(~b.side_to_move, scored[i].move, depth);
             }
+            // TT store
+            tt.store(b.hash(), scored[i].move, depth, score, TT_BETA);
             return beta;
         }
 
@@ -200,11 +363,15 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
     }
 
     if (best_move.is_null()) {
-        if (b.is_attacked(b.king_square(b.side_to_move), ~b.side_to_move))
+        if (in_check)
             return -MATE_SCORE + ply;
         else
             return 0;
     }
+
+    // TT store
+    TTFlag flag = (alpha == old_alpha) ? TT_ALPHA : TT_EXACT;
+    tt.store(b.hash(), best_move, depth, alpha, flag);
 
     if (ply == 0) {
         info.best_move = best_move;
@@ -222,6 +389,12 @@ void Search::go(Board& b, const SearchLimits& lim) {
     stopped.store(false, std::memory_order_relaxed);
     search_start = std::chrono::steady_clock::now();
     clear_tables();
+    tt.new_search();
+
+    // Initialize TT with 16MB on first use
+    if (!tt.is_initialized())
+        tt.resize(16);
+
     SearchInfo info{};
 
     int64_t time_budget = alloc_time_ms(b.side_to_move, b.game_ply);

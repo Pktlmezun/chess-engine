@@ -175,13 +175,46 @@ static int calculate_phase(const Board& b) {
 
 // ── Mobility ─────────────────────────────────────────────────────────────────
 static int count_mobility(const Board& b, Color side) {
-    // Temporarily set side_to_move to generate moves for the desired side
-    // (MoveGen::generate uses b.side_to_move internally)
-    // We count pseudo-legal moves as a mobility proxy.
     Board tmp = b;
     tmp.side_to_move = side;
     Move list[256];
     return MoveGen::generate(tmp, list);
+}
+
+// ── Hanging piece detection ──────────────────────────────────────────────────
+// Penalises pieces that are attacked by enemy but not defended by friendly.
+static int evaluate_threats(const Board& b) {
+    int penalty = 0;
+    Bitboard occ = b.all_pieces();
+
+    for (Color us : {WHITE, BLACK}) {
+        Color them = ~us;
+        Bitboard our_pieces = b.pieces(us) & ~b.pieces(us, PAWN) & ~b.pieces(us, KING);
+
+        while (our_pieces) {
+            Square sq = pop_lsb(our_pieces);
+            Piece p = b.piece_on(sq);
+            PieceType pt = type_of(p);
+
+            // Is this piece attacked by enemy?
+            Bitboard enemy_att = b.attackers_to(sq, occ) & b.pieces(them);
+            if (!enemy_att) continue;
+
+            // Is it defended by friendly? (exclude pawns — attack direction matters)
+            Bitboard friendly_def = b.attackers_to(sq, occ) & b.pieces(us)
+                                  & ~b.pieces(us, PAWN);
+
+            if (!friendly_def) {
+                // Undefended — heavy penalty
+                penalty -= PieceValue[pt];
+            } else if (popcount(enemy_att) > popcount(friendly_def)) {
+                // Outnumbered — partial penalty
+                penalty -= PieceValue[pt] / 4;
+            }
+        }
+    }
+
+    return penalty;
 }
 
 // ── Main evaluation ──────────────────────────────────────────────────────────
@@ -216,6 +249,11 @@ int evaluate(const Board& b) {
     int mob_delta = w_mob - b_mob;
     mg_score += mob_delta * 5;
     eg_score += mob_delta * 5;
+
+    // Hanging pieces / threats
+    int threat_score = evaluate_threats(b);
+    mg_score += threat_score;
+    eg_score += threat_score;
 
     // Interpolate midgame/endgame
     int phase = calculate_phase(b);
