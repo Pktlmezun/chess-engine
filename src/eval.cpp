@@ -1,5 +1,4 @@
 #include "eval.h"
-#include "movegen.h"
 #include <algorithm>
 
 // ── Michniewski Piece-Square Tables ──────────────────────────────────────────
@@ -173,14 +172,6 @@ static int calculate_phase(const Board& b) {
     return (TOTAL_PHASE - phase) * 256 / TOTAL_PHASE;
 }
 
-// ── Mobility ─────────────────────────────────────────────────────────────────
-static int count_mobility(const Board& b, Color side) {
-    Board tmp = b;
-    tmp.side_to_move = side;
-    Move list[256];
-    return MoveGen::generate(tmp, list);
-}
-
 // ── Hanging piece detection ──────────────────────────────────────────────────
 // Penalises pieces that are attacked by enemy but not defended by friendly.
 static int evaluate_threats(const Board& b) {
@@ -205,10 +196,8 @@ static int evaluate_threats(const Board& b) {
                                   & ~b.pieces(us, PAWN);
 
             if (!friendly_def) {
-                // Undefended — heavy penalty
                 penalty -= PieceValue[pt];
             } else if (popcount(enemy_att) > popcount(friendly_def)) {
-                // Outnumbered — partial penalty
                 penalty -= PieceValue[pt] / 4;
             }
         }
@@ -222,33 +211,26 @@ int evaluate(const Board& b) {
     int mg_score = 0;
     int eg_score = 0;
 
-    // Material + PST
-    for (int sq = A1; sq <= H8; ++sq) {
+    // Material + PST — iterate only occupied squares via bitboards
+    Bitboard all = b.all_pieces();
+    while (all) {
+        Square sq = pop_lsb(all);
         Piece p = b.mailbox[sq];
-        if (p == NO_PIECE) continue;
-
         PieceType pt = type_of(p);
         Color c = color_of(p);
         int idx = (c == WHITE) ? sq : flip(Square(sq));
 
-        int mg_bonus = PST_MG[pt][idx];
-        int eg_bonus = PST_EG[pt][idx];
+        int val = PieceValue[pt] + PST_MG[pt][idx];
+        int val_eg = PieceValue[pt] + PST_EG[pt][idx];
 
         if (c == WHITE) {
-            mg_score += PieceValue[pt] + mg_bonus;
-            eg_score += PieceValue[pt] + eg_bonus;
+            mg_score += val;
+            eg_score += val_eg;
         } else {
-            mg_score -= PieceValue[pt] + mg_bonus;
-            eg_score -= PieceValue[pt] + eg_bonus;
+            mg_score -= val;
+            eg_score -= val_eg;
         }
     }
-
-    // Mobility
-    int w_mob = count_mobility(b, WHITE);
-    int b_mob = count_mobility(b, BLACK);
-    int mob_delta = w_mob - b_mob;
-    mg_score += mob_delta * 5;
-    eg_score += mob_delta * 5;
 
     // Hanging pieces / threats
     int threat_score = evaluate_threats(b);
