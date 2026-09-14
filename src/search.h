@@ -42,6 +42,8 @@ struct ScoredMove {
     int  score;
 };
 
+static constexpr int SEARCH_MAX_PLY = 128;
+
 struct SearchLimits {
     int depth = 64;
     int64_t wtime = 0;
@@ -57,7 +59,7 @@ struct SearchInfo {
     int score;
     uint64_t nodes;
     Move best_move;
-    Move pv[64];
+    Move pv[SEARCH_MAX_PLY];
     int pv_len;
 };
 
@@ -71,11 +73,11 @@ public:
     static void clear_tables();
 
 private:
-    static constexpr int MAX_PLY = 128;
+    static constexpr int MAX_PLY = SEARCH_MAX_PLY;
 
     static uint64_t nodes;
-    static Move pv_table[64][64];
-    static int pv_len[64];
+    static Move pv_table[MAX_PLY][MAX_PLY];
+    static int pv_len[MAX_PLY];
     static SearchLimits limits;
     static std::chrono::steady_clock::time_point search_start;
     static int64_t alloc_time_ms(Color side, int game_ply);

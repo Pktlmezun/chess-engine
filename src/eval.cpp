@@ -180,6 +180,7 @@ static int evaluate_threats(const Board& b) {
 
     for (Color us : {WHITE, BLACK}) {
         Color them = ~us;
+        int sign = (us == WHITE) ? -1 : +1;
         Bitboard our_pieces = b.pieces(us) & ~b.pieces(us, PAWN) & ~b.pieces(us, KING);
 
         while (our_pieces) {
@@ -187,18 +188,16 @@ static int evaluate_threats(const Board& b) {
             Piece p = b.piece_on(sq);
             PieceType pt = type_of(p);
 
-            // Is this piece attacked by enemy?
             Bitboard enemy_att = b.attackers_to(sq, occ) & b.pieces(them);
             if (!enemy_att) continue;
 
-            // Is it defended by friendly? (exclude pawns — attack direction matters)
             Bitboard friendly_def = b.attackers_to(sq, occ) & b.pieces(us)
                                   & ~b.pieces(us, PAWN);
 
             if (!friendly_def) {
-                penalty -= PieceValue[pt];
+                penalty += sign * PieceValue[pt];
             } else if (popcount(enemy_att) > popcount(friendly_def)) {
-                penalty -= PieceValue[pt] / 4;
+                penalty += sign * PieceValue[pt] / 4;
             }
         }
     }

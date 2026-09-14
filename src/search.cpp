@@ -29,8 +29,8 @@ std::atomic<bool> Search::stopped{false};
 std::mutex Search::output_mutex;
 
 uint64_t Search::nodes = 0;
-Move     Search::pv_table[64][64];
-int      Search::pv_len[64];
+Move     Search::pv_table[MAX_PLY][MAX_PLY];
+int      Search::pv_len[MAX_PLY];
 SearchLimits Search::limits{};
 std::chrono::steady_clock::time_point Search::search_start{};
 Move     Search::killer_moves[MAX_PLY][2];
@@ -287,6 +287,15 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
     for (int i = 0; i < count; ++i)
         scored[i] = { list[i], score_move(b, list[i], ply) };
 
+    // If we have a TT move, verify it's in our move list (catches hash collisions)
+    if (!tt_move.is_null()) {
+        bool found = false;
+        for (int i = 0; i < count; ++i) {
+            if (scored[i].move == tt_move) { found = true; break; }
+        }
+        if (!found) tt_move = Move::null();
+    }
+
     // If we have a TT move, promote it to the front
     if (!tt_move.is_null()) {
         for (int i = 0; i < count; ++i) {
@@ -399,7 +408,6 @@ void Search::go(Board& b, const SearchLimits& lim) {
     limits = lim;
     stopped.store(false, std::memory_order_relaxed);
     search_start = std::chrono::steady_clock::now();
-    clear_tables();
     tt.new_search();
 
     // Initialize TT with 16MB on first use
@@ -411,6 +419,7 @@ void Search::go(Board& b, const SearchLimits& lim) {
     int64_t time_budget = alloc_time_ms(b.side_to_move, b.game_ply);
 
     for (int d = 1; d <= limits.depth; ++d) {
+        info = SearchInfo{};
         info.depth = d;
         int score = negamax(b, d, -SCORE_INF, SCORE_INF, 0, info);
 
@@ -438,14 +447,15 @@ void Search::go(Board& b, const SearchLimits& lim) {
 
         if (!limits.infinite) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - search_start).count();
-            if (elapsed * 4 > time_budget)
+            if (elapsed * 2 > time_budget)
                 break;
         }
     }
 
     {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cout << "bestmove " << info.pv[0].to_string() << "\n";
+        Move best = info.best_move.is_null() ? info.pv[0] : info.best_move;
+        std::cout << "bestmove " << best.to_string() << "\n";
         std::cout.flush();
     }
 }
