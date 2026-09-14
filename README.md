@@ -1,9 +1,44 @@
-# ♟ Chess Engine
+<h1 align="center">♟ Chess Engine</h1>
 
-A high-performance chess engine written in C++17 with bitboard representation, alpha-beta search, and UCI protocol support.
+<p align="center">
+  <img src="https://img.shields.io/badge/C%2B%2B-17-blue?logo=cplusplus" alt="C++17">
+  <img src="https://img.shields.io/badge/Protocol-UCI-green" alt="UCI">
+  <img src="https://img.shields.io/badge/Search-Alpha--Beta-orange" alt="Alpha-Beta">
+  <img src="https://img.shields.io/badge/Bitboards-Magic-red" alt="Magic Bitboards">
+</p>
+
+<p align="center">
+  A high-performance chess engine written in C++17 with bitboard representation,<br>
+  alpha-beta search, and UCI protocol support.
+</p>
+
+<p align="center">
+  <img src="assets/pawn-white.svg" alt="Chess Pawn" width="120">
+</p>
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
+║  ┌───┬───┬───┬───┬───┬───┬───┬───┐                            ║
+║  │ r │   │   │   │ k │   │   │ r │  ← Magic Bitboards         ║
+║  ├───┼───┼───┼───┼───┼───┼───┼───┤  ← Alpha-Beta Pruning      ║
+║  │ p │   │ p │ p │ q │ p │ b │   │  ← Transposition Table      ║
+║  ├───┼───┼───┼───┼───┼───┼───┼───┤  ← Null Move Pruning       ║
+║  │   │ b │ n │   │ p │ n │ p │   │  ← Late Move Reductions     ║
+║  ├───┼───┼───┼───┼───┼───┼───┼───┤  ← Quiescence Search       ║
+║  │   │   │   │ P │ N │   │   │   │  ← PST Evaluation           ║
+║  ├───┼───┼───┼───┼───┼───┼───┼───┤                            ║
+║  │   │ p │   │   │ P │   │   │   │  UCI Protocol               ║
+║  ├───┼───┼───┼───┼───┼───┼───┼───┤  C++17 / CMake             ║
+║  │ P │ P │ P │ B │ P │   │ Q │ p │                            ║
+║  ├───┼───┼───┼───┼───┼───┼───┼───┤  ~200KN/s @ 3.8GHz        ║
+║  │ R │   │   │   │ K │   │   │ R │                            ║
+║  └───┴───┴───┴───┴───┴───┴───┴───┘                            ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+## Features
 ║  ┌───┬───┬───┬───┬───┬───┬───┬───┐                            ║
 ║  │ r │   │   │   │ k │   │   │ r │  ← Magic Bitboards         ║
 ║  ├───┼───┼───┼───┼───┼───┼───┼───┤  ← Alpha-Beta Pruning      ║
