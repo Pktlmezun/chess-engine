@@ -43,6 +43,9 @@ public:
     void make_move(Move m);
     void unmake_move(Move m);
 
+    // Recompute Zobrist hash from scratch (slow, for debugging/verification)
+    uint64_t compute_hash() const;
+
     // ── Accessors ─────────────────────────────────────────────────────────────
     Piece    piece_on(Square s)          const { return mailbox[s]; }
     PieceType type_on(Square s)          const { return type_of(mailbox[s]); }

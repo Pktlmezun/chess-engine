@@ -36,6 +36,7 @@ std::chrono::steady_clock::time_point Search::search_start{};
 Move     Search::killer_moves[MAX_PLY][2];
 int      Search::history[COLOR_NB][64][64];
 TranspositionTable Search::tt;
+Move Search::last_validated_bestmove;
 
 // ── Transposition Table implementation ───────────────────────────────────────
 
@@ -92,9 +93,10 @@ int64_t Search::alloc_time_ms(Color side, int game_ply) {
     if (our_time <= 0)
         return 1000; // default 1 second
 
-    int moves_left = std::max(20, 30 - game_ply / 2);
+    int moves_left = std::max(10, 30 - game_ply / 2);
     int64_t t = our_time / moves_left + our_inc / 2;
-    t = std::min(t, our_time / 2);
+    // Use at most 1/4 of remaining time, and always leave at least 1 second buffer
+    t = std::min(t, (our_time - 1000) / 4);
     return std::max(t, INT64_C(1));
 }
 
@@ -222,6 +224,10 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
 
     if (depth <= 0)
         return quiescence(b, alpha, beta, ply);
+
+    // Reset PV length for this ply so stale data from previous iterations
+    // doesn't leak into the PV when subtrees are pruned (null move, futility, etc.)
+    pv_len[ply] = 0;
 
     // ── TT probe ──────────────────────────────────────────────────────────
     TTEntry tt_entry;
@@ -415,20 +421,135 @@ void Search::go(Board& b, const SearchLimits& lim) {
         tt.resize(16);
 
     SearchInfo info{};
+    Move validated_best = Move::null();
+
+    // ── Board integrity verification ──────────────────────────────────────────
+    // Save expected hash at start of search for corruption detection
+    uint64_t expected_hash = b.hash();
+    uint64_t expected_computed = b.compute_hash();
+    if (expected_hash != expected_computed) {
+        std::cerr << "HASH MISMATCH at search start: stored=0x" << std::hex << expected_hash
+                  << " computed=0x" << expected_computed << std::dec << "\n";
+        std::cerr << "  FEN: " << b.to_fen() << "\n";
+    }
+    // Save mailbox snapshot for full state comparison
+    Piece snapshot_mailbox[SQ_NB];
+    Color snapshot_side = b.side_to_move;
+    int   snapshot_ply  = b.game_ply;
+    int   snapshot_idx  = b.state_idx;
+    memcpy(snapshot_mailbox, b.mailbox, sizeof(snapshot_mailbox));
 
     int64_t time_budget = alloc_time_ms(b.side_to_move, b.game_ply);
+    bool board_corrupted = false;
 
     for (int d = 1; d <= limits.depth; ++d) {
-        info = SearchInfo{};
-        info.depth = d;
-        int score = negamax(b, d, -SCORE_INF, SCORE_INF, 0, info);
+        SearchInfo depth_info{};
+        depth_info.depth = d;
+        int score = negamax(b, d, -SCORE_INF, SCORE_INF, 0, depth_info);
+
+        // ── Board integrity check after each depth ────────────────────────────
+        // Verify the incremental hash hasn't drifted from the expected value
+        if (b.hash() != expected_hash) {
+            std::cerr << "HASH DRIFT at depth " << d
+                      << ": expected=0x" << std::hex << expected_hash
+                      << " actual=0x" << b.hash() << std::dec << "\n";
+            std::cerr << "  FEN: " << b.to_fen() << "\n";
+            board_corrupted = true;
+        }
+        // Verify incremental hash matches recomputed hash
+        uint64_t recomputed = b.compute_hash();
+        if (recomputed != b.hash()) {
+            std::cerr << "HASH INCONSISTENT at depth " << d
+                      << ": incremental=0x" << std::hex << b.hash()
+                      << " recomputed=0x" << recomputed << std::dec << "\n";
+            std::cerr << "  FEN: " << b.to_fen() << "\n";
+            board_corrupted = true;
+        }
+        // Verify mailbox snapshot matches
+        if (memcmp(b.mailbox, snapshot_mailbox, sizeof(snapshot_mailbox)) != 0
+            || b.side_to_move != snapshot_side
+            || b.game_ply != snapshot_ply
+            || b.state_idx != snapshot_idx)
+        {
+            std::cerr << "BOARD STATE DRIFT at depth " << d << "\n";
+            std::cerr << "  FEN (current):  " << b.to_fen() << "\n";
+            board_corrupted = true;
+        }
+
+        // ── Validate best move with FULL legality check ───────────────────────
+        if (!depth_info.best_move.is_null() && !board_corrupted) {
+            // Full legality: make_move, check king safety, unmake_move
+            Move m = depth_info.best_move;
+            b.make_move(m);
+            bool leaves_king_in_check = b.is_attacked(
+                b.king_square(~b.side_to_move), b.side_to_move);
+            b.unmake_move(m);
+
+            if (!leaves_king_in_check) {
+                validated_best = depth_info.best_move;
+            } else {
+                std::cerr << "SAFETY: depth " << d << " bestmove " << m.to_string()
+                          << " leaves king in check! Searching for legal move...\n";
+                // Find first fully legal move
+                Move legal_list[256];
+                int legal_count = MoveGen::generate(b, legal_list);
+                for (int i = 0; i < legal_count; ++i) {
+                    b.make_move(legal_list[i]);
+                    bool safe = !b.is_attacked(
+                        b.king_square(~b.side_to_move), b.side_to_move);
+                    b.unmake_move(legal_list[i]);
+                    if (safe) {
+                        validated_best = legal_list[i];
+                        break;
+                    }
+                }
+            }
+        } else if (!depth_info.best_move.is_null() && board_corrupted) {
+            // Board is corrupted — find any fully legal move from current (corrupted) state
+            std::cerr << "Using fallback move due to board corruption\n";
+            Move legal_list[256];
+            int legal_count = MoveGen::generate(b, legal_list);
+            for (int i = 0; i < legal_count; ++i) {
+                b.make_move(legal_list[i]);
+                bool safe = !b.is_attacked(
+                    b.king_square(~b.side_to_move), b.side_to_move);
+                b.unmake_move(legal_list[i]);
+                if (safe) {
+                    validated_best = legal_list[i];
+                    break;
+                }
+            }
+        } else if (depth_info.pv_len > 0) {
+            validated_best = depth_info.pv[0];
+        }
 
         if (stopped.load(std::memory_order_relaxed))
             break;
 
+        info = depth_info;
+
         auto now = std::chrono::steady_clock::now();
         int elapsed_ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(now - search_start).count());
         int nps = (elapsed_ms > 0) ? int(nodes * 1000 / elapsed_ms) : 0;
+
+        // ── Validate PV: truncate at first illegal move ─────────────────────
+        {
+            Board pv_board = b;
+            int valid_len = 0;
+            for (int i = 0; i < depth_info.pv_len; ++i) {
+                Move m = depth_info.pv[i];
+                Move legal_list[256];
+                int legal_count = MoveGen::generate(pv_board, legal_list);
+                bool found = false;
+                for (int j = 0; j < legal_count; ++j) {
+                    if (legal_list[j] == m) { found = true; break; }
+                }
+                if (!found) break;
+                pv_board.make_move(m);
+                valid_len++;
+            }
+            depth_info.pv_len = valid_len;
+        }
 
         std::lock_guard<std::mutex> lock(output_mutex);
         std::cout << "info depth " << d
@@ -437,8 +558,8 @@ void Search::go(Board& b, const SearchLimits& lim) {
                   << " nps " << nps
                   << " time " << elapsed_ms
                   << " pv ";
-        for (int i = 0; i < info.pv_len; ++i)
-            std::cout << info.pv[i].to_string() << " ";
+        for (int i = 0; i < depth_info.pv_len; ++i)
+            std::cout << depth_info.pv[i].to_string() << " ";
         std::cout << "\n";
         std::cout.flush();
 
@@ -452,9 +573,38 @@ void Search::go(Board& b, const SearchLimits& lim) {
         }
     }
 
+    // ── Final board integrity check ───────────────────────────────────────────
+    if (b.hash() != expected_hash || b.compute_hash() != b.hash()) {
+        std::cerr << "BOARD CORRUPTED at end of search\n";
+        std::cerr << "  Expected hash: 0x" << std::hex << expected_hash << std::dec << "\n";
+        std::cerr << "  Actual hash:   0x" << std::hex << b.hash() << std::dec << "\n";
+        std::cerr << "  FEN: " << b.to_fen() << "\n";
+        board_corrupted = true;
+    }
+    if (memcmp(b.mailbox, snapshot_mailbox, sizeof(snapshot_mailbox)) != 0) {
+        std::cerr << "MAILBOX CORRUPTED at end of search\n";
+        std::cerr << "  FEN: " << b.to_fen() << "\n";
+        board_corrupted = true;
+    }
+
     {
         std::lock_guard<std::mutex> lock(output_mutex);
-        Move best = info.best_move.is_null() ? info.pv[0] : info.best_move;
+        Move best = validated_best;
+
+        // Final fallback: if no move was validated, use PV or generate from board
+        if (best.is_null()) {
+            if (info.pv_len > 0)
+                best = info.pv[0];
+            else {
+                Move legal_list[256];
+                int legal_count = MoveGen::generate(b, legal_list);
+                if (legal_count > 0) best = legal_list[0];
+            }
+        }
+
+        // Store validated best move
+        last_validated_bestmove = best;
+
         std::cout << "bestmove " << best.to_string() << "\n";
         std::cout.flush();
     }

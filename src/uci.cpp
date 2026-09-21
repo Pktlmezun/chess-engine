@@ -50,6 +50,9 @@ void UCI::handle_position(std::istringstream& iss) {
             board.make_move(m);
         }
     }
+
+    // Debug: log FEN after position command
+    std::cerr << "info string FEN: " << board.to_fen() << "\n";
 }
 
 void UCI::handle_go(std::istringstream& iss) {
@@ -70,6 +73,10 @@ void UCI::handle_go(std::istringstream& iss) {
 
     Search::stopped.store(false, std::memory_order_relaxed);
     Board board_copy = board;
+
+    // Debug: log position before search
+    std::cerr << "info string GO FEN: " << board_copy.to_fen()
+              << " hash: " << board_copy.hash() << "\n";
 
     search_thread = std::thread([board_copy, limits]() mutable {
         Search::go(board_copy, limits);

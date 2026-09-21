@@ -12,9 +12,27 @@
   alpha-beta search, and UCI protocol support.
 </p>
 
-<p align="center">
-  <img src="assets/pawn-white.svg" alt="Chess Pawn" width="120">
-</p>
+<pre align="center">
+
+                            _\\\\X
+                          \\\!!!XX
+                          / \\!XXX
+                        _/ @  !\XX\
+                       /        \X\
+                      |; ___)   \X\
+                      (_/ /! !  \\X
+                         / ! !  \\X\
+                        (    !  \\X\
+                         \   ! /\X\\
+                          \  ! /\X\\
+                           \  ///X\
+                           (-----)\
+                            )---(
+                           /     \
+                          (_______)
+                          /_______\
+
+</pre>
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗

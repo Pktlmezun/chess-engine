@@ -139,6 +139,23 @@ void Board::set_from_fen(const std::string& fen) {
     st.rule50 = hmove;
 }
 
+// ── Recompute hash from scratch ──────────────────────────────────────────────
+uint64_t Board::compute_hash() const {
+    uint64_t h = 0;
+    for (int s = 0; s < SQ_NB; ++s) {
+        Piece p = mailbox[s];
+        if (p != NO_PIECE)
+            h ^= ZobristPiece[color_of(p)][type_of(p)][s];
+    }
+    if (side_to_move == BLACK)
+        h ^= ZobristSide;
+    h ^= ZobristCastle[castling_rights()];
+    Square ep = ep_square();
+    if (ep != SQ_NONE)
+        h ^= ZobristEP[file_of(ep)];
+    return h;
+}
+
 // ── make_move ────────────────────────────────────────────────────────────────
 void Board::make_move(Move m) {
     // Copy state forward

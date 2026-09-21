@@ -71,6 +71,7 @@ public:
     static void go(Board& b, const SearchLimits& limits = SearchLimits{});
     static void stop();
     static void clear_tables();
+    static Move get_last_bestmove() { return last_validated_bestmove; }
 
 private:
     static constexpr int MAX_PLY = SEARCH_MAX_PLY;
@@ -92,6 +93,9 @@ private:
 
     // Transposition table
     static TranspositionTable tt;
+
+    // Last validated best move (set by go(), read by UCI handler after join)
+    static Move last_validated_bestmove;
 
     static int negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInfo& info);
     static int quiescence(Board& b, int alpha, int beta, int ply);

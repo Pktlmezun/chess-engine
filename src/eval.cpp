@@ -205,6 +205,236 @@ static int evaluate_threats(const Board& b) {
     return penalty;
 }
 
+// ── Pawn Structure Evaluation ─────────────────────────────────────────────────
+
+static constexpr int ISOLATED_PAWN_PENALTY  = 15;
+static constexpr int DOUBLED_PAWN_PENALTY   = 12;
+static constexpr int BACKWARD_PAWN_PENALTY  = 10;
+
+static int evaluate_pawn_structure(const Board& b) {
+    int score = 0;
+
+    for (Color us : {WHITE, BLACK}) {
+        int sign = (us == WHITE) ? +1 : -1;
+        Bitboard pawns = b.pieces(us, PAWN);
+        Bitboard their_pawns = b.pieces(~us, PAWN);
+
+        // --- Doubled pawns: penalty for each pawn beyond the first on a file ---
+        for (int f = FILE_A; f <= FILE_H; ++f) {
+            Bitboard file_pawns = pawns & FileBB[f];
+            int count = popcount(file_pawns);
+            if (count > 1)
+                score += sign * DOUBLED_PAWN_PENALTY * (count - 1);
+        }
+
+        // --- Isolated & backward pawns ---
+        Bitboard own_pawns = pawns;
+        while (own_pawns) {
+            Square sq = pop_lsb(own_pawns);
+            int f = file_of(sq);
+            int r = rank_of(sq);
+
+            // Adjacent files have friendly pawns?
+            Bitboard adjacent_files = (f > FILE_A ? FileBB[f - 1] : Bitboard(0))
+                                    | (f < FILE_H ? FileBB[f + 1] : Bitboard(0));
+            bool has_friendly_neighbor = (pawns & adjacent_files) != 0;
+
+            if (!has_friendly_neighbor) {
+                // Isolated pawn
+                score += sign * ISOLATED_PAWN_PENALTY;
+
+                // Extra penalty if isolated and not well-supported
+                // (backward: can't be defended by friendly pawns)
+                Bitboard support_squares;
+                if (us == WHITE) {
+                    support_squares = (f > FILE_A ? sq_bb(Square(sq + 7)) : Bitboard(0))
+                                    | (f < FILE_H ? sq_bb(Square(sq + 9)) : Bitboard(0));
+                } else {
+                    support_squares = (f > FILE_A ? sq_bb(Square(sq - 9)) : Bitboard(0))
+                                    | (f < FILE_H ? sq_bb(Square(sq - 7)) : Bitboard(0));
+                }
+                if (!(support_squares & pawns))
+                    score += sign * BACKWARD_PAWN_PENALTY;
+            }
+        }
+    }
+
+    return score;
+}
+
+// ── Passed Pawn Evaluation ────────────────────────────────────────────────────
+// Passed pawn: no enemy pawns on same or adjacent files ahead of it.
+// Bonus scales with rank (how close to promotion).
+
+static constexpr int PassedPawnBonus[8] = { 0, 5, 10, 20, 35, 60, 100, 0 };
+
+static int evaluate_passed_pawns(const Board& b) {
+    int score = 0;
+
+    for (Color us : {WHITE, BLACK}) {
+        int sign = (us == WHITE) ? +1 : -1;
+        Bitboard pawns = b.pieces(us, PAWN);
+        Bitboard their_pawns = b.pieces(~us, PAWN);
+
+        while (pawns) {
+            Square sq = pop_lsb(pawns);
+            int f = file_of(sq);
+            int r = rank_of(sq);
+
+            // Mask of files: own file + adjacent files
+            Bitboard file_mask = FileBB[f];
+            if (f > FILE_A) file_mask |= FileBB[f - 1];
+            if (f < FILE_H) file_mask |= FileBB[f + 1];
+
+            // Squares ahead of the pawn (on those files)
+            Bitboard ahead;
+            if (us == WHITE) {
+                ahead = file_mask & (~Bitboard(0) << (sq + 8));  // ranks above sq
+            } else {
+                ahead = file_mask & (~Bitboard(0) >> (63 - sq + 8));  // ranks below sq
+            }
+
+            // Is it passed? No enemy pawns on those files ahead
+            if (!(ahead & their_pawns)) {
+                int rank_idx;
+                if (us == WHITE)
+                    rank_idx = r;  // RANK_1=0 .. RANK_8=7, higher = closer to promo
+                else
+                    rank_idx = 7 - r;
+
+                score += sign * PassedPawnBonus[rank_idx];
+            }
+        }
+    }
+
+    return score;
+}
+
+// ── Mobility Evaluation ───────────────────────────────────────────────────────
+// Bonus for squares attacked by our pieces (excluding own king and pawns).
+// More mobile pieces = better position.
+
+static constexpr int MobilityBonus[PIECE_TYPE_NB] = {
+    0,   // NONE
+    0,   // PAWN (don't count pawn attacks for mobility)
+    4,   // KNIGHT: 4 cp per square
+    4,   // BISHOP: 4 cp per square
+    2,   // ROOK: 2 cp per square (already valuable)
+    1,   // QUEEN: 1 cp per square (queen already very mobile)
+    0,   // KING
+};
+
+static int evaluate_mobility(const Board& b) {
+    int score = 0;
+    Bitboard occ = b.all_pieces();
+
+    for (Color us : {WHITE, BLACK}) {
+        int sign = (us == WHITE) ? +1 : -1;
+        Bitboard our_pieces = b.pieces(us);
+
+        // Knights
+        Bitboard knights = b.pieces(us, KNIGHT);
+        while (knights) {
+            Square sq = pop_lsb(knights);
+            Bitboard attacks = KnightAttacks[sq] & ~our_pieces;
+            score += sign * MobilityBonus[KNIGHT] * popcount(attacks);
+        }
+
+        // Bishops
+        Bitboard bishops = b.pieces(us, BISHOP);
+        while (bishops) {
+            Square sq = pop_lsb(bishops);
+            Bitboard attacks = bishop_attacks(sq, occ) & ~our_pieces;
+            score += sign * MobilityBonus[BISHOP] * popcount(attacks);
+        }
+
+        // Rooks
+        Bitboard rooks = b.pieces(us, ROOK);
+        while (rooks) {
+            Square sq = pop_lsb(rooks);
+            Bitboard attacks = rook_attacks(sq, occ) & ~our_pieces;
+            score += sign * MobilityBonus[ROOK] * popcount(attacks);
+        }
+
+        // Queen
+        Bitboard queens = b.pieces(us, QUEEN);
+        while (queens) {
+            Square sq = pop_lsb(queens);
+            Bitboard attacks = queen_attacks(sq, occ) & ~our_pieces;
+            score += sign * MobilityBonus[QUEEN] * popcount(attacks);
+        }
+    }
+
+    return score;
+}
+
+// ── Bishop Pair Bonus ─────────────────────────────────────────────────────────
+static constexpr int BISHOP_PAIR_BONUS = 45;
+
+// ── Rook on Open File ─────────────────────────────────────────────────────────
+static constexpr int ROOK_OPEN_FILE_BONUS    = 25;
+static constexpr int ROOK_SEMI_OPEN_BONUS    = 12;
+
+// ── King Safety ───────────────────────────────────────────────────────────────
+// Penalize open/semi-open files near king, reward pawn shield.
+
+static constexpr int OPEN_FILE_NEAR_KING_PENALTY   = 20;
+static constexpr int SEMI_OPEN_FILE_NEAR_KING_PENALTY = 10;
+static constexpr int PAWN_SHIELD_BONUS             = 8;
+
+static int evaluate_king_safety(const Board& b) {
+    int score = 0;
+    Bitboard occ = b.all_pieces();
+
+    for (Color us : {WHITE, BLACK}) {
+        int sign = (us == WHITE) ? +1 : -1;
+        Square ksq = b.king_square(us);
+        int kf = file_of(ksq);
+        int kr = rank_of(ksq);
+        Bitboard our_pawns = b.pieces(us, PAWN);
+        Bitboard their_pawns = b.pieces(~us, PAWN);
+
+        // Check files around the king (kf-1, kf, kf+1)
+        for (int f = kf - 1; f <= kf + 1; ++f) {
+            if (f < FILE_A || f > FILE_H) continue;
+
+            Bitboard file_pawns_all = occ & FileBB[f];
+            Bitboard own_file_pawns = our_pawns & FileBB[f];
+            Bitboard their_file_pawns = their_pawns & FileBB[f];
+
+            if (!own_file_pawns && !their_file_pawns) {
+                // Completely open file near king — big penalty
+                score += sign * OPEN_FILE_NEAR_KING_PENALTY;
+            } else if (!own_file_pawns) {
+                // Semi-open (only enemy pawns on file) — penalty
+                score += sign * SEMI_OPEN_FILE_NEAR_KING_PENALTY;
+            }
+        }
+
+        // Pawn shield: bonus for having pawns in front of king
+        // Check ranks in front of king (for White: kr+1, kr+2; for Black: kr-1, kr-2)
+        for (int dr = 1; dr <= 2; ++dr) {
+            int shield_rank;
+            if (us == WHITE)
+                shield_rank = kr + dr;
+            else
+                shield_rank = kr - dr;
+
+            if (shield_rank < RANK_1 || shield_rank > RANK_8) continue;
+
+            // Check the shield file and adjacent files
+            for (int f = kf - 1; f <= kf + 1; ++f) {
+                if (f < FILE_A || f > FILE_H) continue;
+                Square shield_sq = make_square(File(f), Rank(shield_rank));
+                if (b.piece_on(shield_sq) == make_piece(us, PAWN))
+                    score += sign * PAWN_SHIELD_BONUS;
+            }
+        }
+    }
+
+    return score;
+}
+
 // ── Main evaluation ──────────────────────────────────────────────────────────
 int evaluate(const Board& b) {
     int mg_score = 0;
@@ -235,6 +465,52 @@ int evaluate(const Board& b) {
     int threat_score = evaluate_threats(b);
     mg_score += threat_score;
     eg_score += threat_score;
+
+    // Pawn structure (same in mg and eg)
+    int pawn_score = evaluate_pawn_structure(b);
+    mg_score += pawn_score;
+    eg_score += pawn_score;
+
+    // Passed pawns (bigger bonus in endgame)
+    int passed_score = evaluate_passed_pawns(b);
+    mg_score += passed_score / 2;   // half in middlegame
+    eg_score += passed_score;       // full in endgame
+
+    // Mobility (slightly more important in middlegame)
+    int mobility_score = evaluate_mobility(b);
+    mg_score += mobility_score;
+    eg_score += mobility_score * 3 / 4;
+
+    // Bishop pair
+    for (Color us : {WHITE, BLACK}) {
+        int sign = (us == WHITE) ? +1 : -1;
+        if (popcount(b.pieces(us, BISHOP)) >= 2) {
+            mg_score += sign * BISHOP_PAIR_BONUS;
+            eg_score += sign * BISHOP_PAIR_BONUS;
+        }
+    }
+
+    // Rook on open/semi-open files
+    for (Color us : {WHITE, BLACK}) {
+        int sign = (us == WHITE) ? +1 : -1;
+        Bitboard rooks = b.pieces(us, ROOK);
+        Bitboard our_pawns = b.pieces(us, PAWN);
+        Bitboard their_pawns = b.pieces(~us, PAWN);
+
+        while (rooks) {
+            Square sq = pop_lsb(rooks);
+            Bitboard file = FileBB[file_of(sq)];
+
+            if (!(our_pawns & file) && !(their_pawns & file))
+                mg_score += sign * ROOK_OPEN_FILE_BONUS;  // open file
+            else if (!(our_pawns & file))
+                mg_score += sign * ROOK_SEMI_OPEN_BONUS;  // semi-open
+        }
+    }
+
+    // King safety (only matters in middlegame)
+    int king_safety = evaluate_king_safety(b);
+    mg_score += king_safety;
 
     // Interpolate midgame/endgame
     int phase = calculate_phase(b);
