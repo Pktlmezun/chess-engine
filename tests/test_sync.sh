@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test: feed moves to the engine and check the FEN output matches expected
-ENGINE="/Users/bekarysshaimardan/Desktop/chess-engine/build/chess_engine"
+ENGINE="${ENGINE:-$(cd "$(dirname "$0")/.." && pwd)/build/chess_engine}"
 
 # Test with a known game
 echo "uci

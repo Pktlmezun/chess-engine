@@ -4,6 +4,8 @@
 #include <iostream>
 
 int main() {
+    init_bitboards();
+
     Board board;
     board.set_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 

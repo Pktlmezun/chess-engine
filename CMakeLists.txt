@@ -27,5 +27,13 @@ add_executable(perft tests/perft_test.cpp ${ENGINE_SOURCES})
 target_include_directories(perft PRIVATE src tests)
 target_link_libraries(perft PRIVATE Threads::Threads)
 
+foreach(t test_board_sync test_debug test_game test_make_unmake test_parse)
+    add_executable(${t} tests/${t}.cpp ${ENGINE_SOURCES})
+    target_include_directories(${t} PRIVATE src tests)
+    target_link_libraries(${t} PRIVATE Threads::Threads)
+endforeach()
+
 enable_testing()
 add_test(NAME perft_suite COMMAND perft)
+add_test(NAME make_unmake COMMAND test_make_unmake)
+add_test(NAME board_sync COMMAND test_board_sync)
