@@ -129,19 +129,34 @@ void Search::set_time_limits(Color side, int game_ply) {
         return;
     }
 
-    // Never plan to use more than what we can actually afford to spend.
-    int64_t usable = std::max(INT64_C(1), our_time - MOVE_OVERHEAD_MS);
+    // An absolute reserve the search may never touch. It must NOT scale with the
+    // remaining time: a proportional reserve shrinks as the clock drains, so the
+    // clock's steady state is zero and the engine eventually flags.
+    int64_t reserve = MOVE_OVERHEAD_MS + 200;
+    int64_t usable  = std::max(INT64_C(0), our_time - reserve);
 
-    // Assume a reasonably long game still to come. Underestimating the number of
-    // remaining moves is what drains the clock: each move looks affordable on its
-    // own while the sum is not.
-    int moves_left = std::max(20, 40 - game_ply / 2);
-    int64_t base = our_time / moves_left + our_inc * 3 / 4;
+    if (usable == 0) {
+        // Down to the reserve: move as good as instantly.
+        soft_limit_ms = hard_limit_ms = 1;
+        return;
+    }
+
+    // Assume a long game still to come. This floor sets where the clock settles:
+    // a search runs to the hard limit (2 * base), so in a long game the steady
+    // state is roughly where 2 * usable / moves_left equals the increment. A floor
+    // of 40 keeps that around a second of buffer at 10s + 0.1s, whereas the old
+    // floor of 20 combined with a 3/4-increment bonus settled near 500ms — thin
+    // enough that a normal game of 80+ moves simply ran the clock out.
+    int moves_left = std::max(40, 60 - game_ply / 2);
+
+    // Only a quarter of the increment is added on top of the per-move share; the
+    // increment is income, and spending all of it leaves the clock no way to grow.
+    int64_t base = usable / moves_left + our_inc / 4;
 
     soft_limit_ms = std::min(base, usable / 4);
     // The hard limit lets one critical iteration run over the plan, but never far
     // enough to flag.
-    hard_limit_ms = std::min(base * 2, usable / 3);
+    hard_limit_ms = std::min(base * 2, usable / 2);
 
     soft_limit_ms = std::max(soft_limit_ms, INT64_C(1));
     hard_limit_ms = std::max(hard_limit_ms, soft_limit_ms);
@@ -164,6 +179,18 @@ void Search::check_time() {
 
 void Search::stop() {
     stopped.store(true, std::memory_order_relaxed);
+}
+
+void Search::clear_tt() {
+    if (!tt.is_initialized())
+        tt.resize(16);
+    tt.clear();
+}
+
+void Search::set_hash_size(size_t mb) {
+    if (mb < 1)    mb = 1;
+    if (mb > 4096) mb = 4096;
+    tt.resize(mb);
 }
 
 void Search::clear_tables() {
@@ -338,7 +365,12 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
     // One static eval per node, shared by null-move and futility pruning.
     int static_eval = in_check ? SCORE_NONE : evaluate(b);
 
-    if (!is_root && !in_check && depth >= 3 && ply > 0) {
+    // Null move is unsound in zugzwang, where passing is better than any legal
+    // move. Require the side to move to have a piece besides king and pawns.
+    bool has_pieces = (b.pieces(b.side_to_move) &
+                       ~(b.pieces(b.side_to_move, PAWN) | b.pieces(b.side_to_move, KING))) != 0;
+
+    if (!is_root && !in_check && depth >= 3 && ply > 0 && has_pieces) {
         int eval = static_eval;
         if (eval >= beta) {
             int R = 3;
@@ -538,7 +570,9 @@ static Move first_legal_move(Board& b) {
 void Search::go(Board& b, const SearchLimits& lim) {
     nodes = 0;
     limits = lim;
-    stopped.store(false, std::memory_order_relaxed);
+    // NOTE: `stopped` is deliberately NOT reset here. The caller clears it before
+    // starting this thread; clearing it again would race with a stop request that
+    // arrived in between and silently discard it, leaving the search unstoppable.
     search_start = std::chrono::steady_clock::now();
     tt.new_search();
 
@@ -556,21 +590,64 @@ void Search::go(Board& b, const SearchLimits& lim) {
     assert(expected_hash == b.compute_hash());
 #endif
 
+    int prev_score = 0;
+
     for (int d = 1; d <= limits.depth; ++d) {
         SearchInfo depth_info{};
         depth_info.depth = d;
-        int score = negamax(b, d, -SCORE_INF, SCORE_INF, 0, depth_info);
 
-        bool aborted = stopped.load(std::memory_order_relaxed);
+        // ── Aspiration window ────────────────────────────────────────────────
+        // Search a narrow window around the previous iteration's score; most of
+        // the time the score lands inside it and the narrow bounds cut far more
+        // than a full window would. Widen and re-search on the misses. Only
+        // meaningful because the search is fail-soft: a fail-hard search returns
+        // the window edge, which carries no information to widen towards.
+        int window = 25;
+        int alpha = -SCORE_INF, beta = SCORE_INF;
+        if (d >= 4) {
+            alpha = prev_score - window;
+            beta  = prev_score + window;
+        }
 
-        // The root searches with a full window starting at alpha = -inf, so the
-        // first completed root move always sets best_move. That makes a non-null
-        // best_move usable even from an aborted iteration.
+        int score;
+        bool aborted;
+        while (true) {
+            SearchInfo attempt{};
+            attempt.depth = d;
+            score = negamax(b, d, alpha, beta, 0, attempt);
+            aborted = stopped.load(std::memory_order_relaxed);
+
+            if (aborted) {
+                depth_info = attempt;
+                break;
+            }
+
+            if (score <= alpha && alpha > -SCORE_INF) {
+                // Fail low: the move is worse than we hoped. Keep beta so the
+                // re-search stays narrow on one side.
+                window *= 2;
+                alpha = (window > 6400) ? -SCORE_INF : score - window;
+                continue;
+            }
+            if (score >= beta && beta < SCORE_INF) {
+                window *= 2;
+                beta = (window > 6400) ? SCORE_INF : score + window;
+                continue;
+            }
+
+            depth_info = attempt;
+            break;
+        }
+
+        // The root searches every move, so a completed root move sets best_move.
+        // That makes a non-null best_move usable even from an aborted iteration.
         if (!depth_info.best_move.is_null())
             best_move = depth_info.best_move;
 
         if (aborted)
             break;
+
+        prev_score = score;
 
         info = depth_info;
 

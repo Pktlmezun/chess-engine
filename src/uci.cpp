@@ -89,12 +89,31 @@ void UCI::loop() {
         if (token == "uci") {
             send("id name ChessEngine");
             send("id author OpenCode");
+            send("option name Hash type spin default 16 min 1 max 4096");
             send("uciok");
         } else if (token == "isready") {
             send("readyok");
+        } else if (token == "setoption") {
+            // setoption name <id> [value <v>]
+            std::string name, value, t;
+            iss >> t; // "name"
+            while (iss >> t && t != "value")
+                name += (name.empty() ? "" : " ") + t;
+            while (iss >> t)
+                value += (value.empty() ? "" : " ") + t;
+            if (name == "Hash" && !value.empty()) {
+                try {
+                    Search::set_hash_size(size_t(std::stoul(value)));
+                } catch (const std::exception&) {
+                    // Ignore a malformed value rather than dying mid-game.
+                }
+            }
         } else if (token == "ucinewgame") {
             stop_search();
             Search::clear_tables();
+            // Entries from the previous game are worse than useless: they key on
+            // positions this game will never reach and only evict live entries.
+            Search::clear_tt();
         } else if (token == "position") {
             handle_position(iss);
         } else if (token == "go") {

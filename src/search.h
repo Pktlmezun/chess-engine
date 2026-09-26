@@ -75,6 +75,9 @@ public:
     static void go(Board& b, const SearchLimits& limits = SearchLimits{});
     static void stop();
     static void clear_tables();
+    // Wipe the transposition table (new game) and set its size in MiB.
+    static void clear_tt();
+    static void set_hash_size(size_t mb);
     static Move get_last_bestmove() { return last_validated_bestmove; }
 
 private:
