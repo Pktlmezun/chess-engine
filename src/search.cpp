@@ -4,6 +4,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cstring>
+#include <cassert>
 
 // Insertion sort — faster than std::sort for small arrays (chess move lists)
 static void insertion_sort(ScoredMove* begin, ScoredMove* end) {
@@ -21,6 +22,20 @@ static void insertion_sort(ScoredMove* begin, ScoredMove* end) {
 constexpr int MATE_SCORE    = SCORE_MATE;           // 999000
 constexpr int MATE_THRESHOLD = SCORE_MATE / 2;      // 499500
 
+// Mate scores are stored relative to the mating node, not to the root, so an
+// entry stays valid whatever ply it is read back at.
+static inline int to_tt_score(int score, int ply) {
+    if (score >  MATE_THRESHOLD) return score + ply;
+    if (score < -MATE_THRESHOLD) return score - ply;
+    return score;
+}
+
+static inline int from_tt_score(int score, int ply) {
+    if (score >  MATE_THRESHOLD) return score - ply;
+    if (score < -MATE_THRESHOLD) return score + ply;
+    return score;
+}
+
 constexpr int KILLER_SCORE  = 9000000;
 constexpr int HISTORY_MAX   = 1 << 21;
 constexpr int64_t MAX_TIME_MS = 300000;             // 5 minutes max
@@ -33,6 +48,8 @@ Move     Search::pv_table[MAX_PLY][MAX_PLY];
 int      Search::pv_len[MAX_PLY];
 SearchLimits Search::limits{};
 std::chrono::steady_clock::time_point Search::search_start{};
+int64_t  Search::soft_limit_ms = MAX_TIME_MS;
+int64_t  Search::hard_limit_ms = MAX_TIME_MS;
 Move     Search::killer_moves[MAX_PLY][2];
 int      Search::history[COLOR_NB][64][64];
 TranspositionTable Search::tt;
@@ -80,24 +97,69 @@ void TranspositionTable::store(uint64_t key, Move best_move, int depth, int scor
     }
 }
 
-int64_t Search::alloc_time_ms(Color side, int game_ply) {
-    if (limits.movetime > 0)
-        return limits.movetime;
+// Milliseconds reserved for process scheduling and GUI round-trip. Without it the
+// engine sends its move at exactly the budget and loses on time.
+static constexpr int64_t MOVE_OVERHEAD_MS = 50;
 
-    if (limits.infinite)
-        return MAX_TIME_MS;
+void Search::set_time_limits(Color side, int game_ply) {
+    if (limits.infinite) {
+        soft_limit_ms = hard_limit_ms = MAX_TIME_MS;
+        return;
+    }
+
+    if (limits.movetime > 0) {
+        hard_limit_ms = std::max(INT64_C(1), limits.movetime - MOVE_OVERHEAD_MS);
+        soft_limit_ms = hard_limit_ms;
+        return;
+    }
+
+    // No clock information at all: this is a pure `go depth N` / `go` search, so
+    // the only limit is the depth the caller asked for.
+    if (limits.wtime <= 0 && limits.btime <= 0) {
+        soft_limit_ms = hard_limit_ms = MAX_TIME_MS;
+        return;
+    }
 
     int64_t our_time = (side == WHITE) ? limits.wtime : limits.btime;
     int64_t our_inc  = (side == WHITE) ? limits.winc  : limits.binc;
 
-    if (our_time <= 0)
-        return 1000; // default 1 second
+    if (our_time <= 0) {
+        // We have a clock but our own side's is empty — move essentially at once.
+        soft_limit_ms = hard_limit_ms = 10;
+        return;
+    }
 
-    int moves_left = std::max(10, 30 - game_ply / 2);
-    int64_t t = our_time / moves_left + our_inc / 2;
-    // Use at most 1/4 of remaining time, and always leave at least 1 second buffer
-    t = std::min(t, (our_time - 1000) / 4);
-    return std::max(t, INT64_C(1));
+    // Never plan to use more than what we can actually afford to spend.
+    int64_t usable = std::max(INT64_C(1), our_time - MOVE_OVERHEAD_MS);
+
+    // Assume a reasonably long game still to come. Underestimating the number of
+    // remaining moves is what drains the clock: each move looks affordable on its
+    // own while the sum is not.
+    int moves_left = std::max(20, 40 - game_ply / 2);
+    int64_t base = our_time / moves_left + our_inc * 3 / 4;
+
+    soft_limit_ms = std::min(base, usable / 4);
+    // The hard limit lets one critical iteration run over the plan, but never far
+    // enough to flag.
+    hard_limit_ms = std::min(base * 2, usable / 3);
+
+    soft_limit_ms = std::max(soft_limit_ms, INT64_C(1));
+    hard_limit_ms = std::max(hard_limit_ms, soft_limit_ms);
+}
+
+int64_t Search::elapsed_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - search_start).count();
+}
+
+// Abort the search once the hard budget is spent. Previously the budget was only
+// honoured *between* iterations, so a single deep iteration could overrun it
+// without bound and flag on the clock.
+void Search::check_time() {
+    if (limits.infinite)
+        return;
+    if (elapsed_ms() >= hard_limit_ms)
+        stopped.store(true, std::memory_order_relaxed);
 }
 
 void Search::stop() {
@@ -155,16 +217,24 @@ void Search::update_pv(int ply, Move m) {
 int Search::quiescence(Board& b, int alpha, int beta, int ply) {
     nodes++;
 
-    if ((nodes & 2047) == 0 && stopped.load(std::memory_order_relaxed))
-        return 0;
+    if ((nodes & 2047) == 0) {
+        check_time();
+        if (stopped.load(std::memory_order_relaxed))
+            return 0;
+    }
+
+    // Never recurse past the arrays indexed by ply.
+    if (ply >= MAX_PLY - 1)
+        return evaluate(b);
 
     int stand_pat = evaluate(b);
+    int best_score = stand_pat;
 
     if (stand_pat >= beta)
-        return beta;
+        return stand_pat;
 
     if (stand_pat + 900 < alpha)
-        return alpha;
+        return stand_pat;
 
     if (stand_pat > alpha)
         alpha = stand_pat;
@@ -197,30 +267,44 @@ int Search::quiescence(Board& b, int alpha, int beta, int ply) {
 
         b.unmake_move(scored[i].move);
 
-        if (score >= beta)
-            return beta;
-        if (score > alpha)
-            alpha = score;
+        if (score > best_score) {
+            best_score = score;
+            if (score >= beta)
+                return best_score;
+            if (score > alpha)
+                alpha = score;
+        }
     }
 
-    return alpha;
+    return best_score;
 }
 
 int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInfo& info) {
     nodes++;
 
-    if ((nodes & 2047) == 0 && stopped.load(std::memory_order_relaxed))
-        return 0;
+    if ((nodes & 2047) == 0) {
+        check_time();
+        if (stopped.load(std::memory_order_relaxed))
+            return 0;
+    }
 
-    // Draw detection
-    if (ply > 0 && b.rule50() >= 100)
+    // Draw detection: fifty-move rule and repetition. Without the repetition
+    // check the engine cannot see repetition draws and will walk into them.
+    if (ply > 0 && (b.rule50() >= 100 || b.is_repetition()))
         return 0;
 
     bool is_root = (ply == 0);
     bool in_check = b.in_check();
 
-    // Check extension: search one ply deeper when in check
-    if (in_check) depth++;
+    // Guard every array indexed by ply. update_pv() touches pv_table[ply + 1],
+    // so running past MAX_PLY is an out-of-bounds write, not just a deep search.
+    if (ply >= MAX_PLY - 2)
+        return in_check ? evaluate(b) : quiescence(b, alpha, beta, ply);
+
+    // Check extension: search one ply deeper when in check. Capped, because an
+    // uncapped extension never lets depth fall in a long forcing sequence.
+    if (in_check && ply + depth < MAX_PLY - 4)
+        depth++;
 
     if (depth <= 0)
         return quiescence(b, alpha, beta, ply);
@@ -236,27 +320,26 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
     if (tt_hit) {
         tt_move = tt_entry.best_move;
         if (!is_root) {
-            int tt_score = tt_entry.score;
-            // Adjust mate scores for ply distance
-            if (tt_score > MATE_THRESHOLD) tt_score -= ply;
-            else if (tt_score < -MATE_THRESHOLD) tt_score += ply;
+            int tt_score = from_tt_score(tt_entry.score, ply);
 
             if (tt_entry.depth >= depth) {
                 if (tt_entry.flag == TT_EXACT)
                     return tt_score;
                 if (tt_entry.flag == TT_ALPHA && tt_score <= alpha)
-                    return alpha;
+                    return tt_score;
                 if (tt_entry.flag == TT_BETA && tt_score >= beta)
-                    return beta;
+                    return tt_score;
             }
         }
     }
 
     // ── Null Move Pruning ─────────────────────────────────────────────────
     // Skip our turn; if we're still winning with depth reduced, prune.
+    // One static eval per node, shared by null-move and futility pruning.
+    int static_eval = in_check ? SCORE_NONE : evaluate(b);
+
     if (!is_root && !in_check && depth >= 3 && ply > 0) {
-        // Evaluate static position — if already >= beta, skip null move
-        int eval = evaluate(b);
+        int eval = static_eval;
         if (eval >= beta) {
             int R = 3;
             // Temporarily flip side, clear EP
@@ -315,89 +398,99 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
     insertion_sort(scored, scored + count);
 
     int moves_searched = 0;
+    int legal_moves = 0;
 
     for (int i = 0; i < count; ++i) {
-        b.make_move(scored[i].move);
+        Move m = scored[i].move;
+
+        // Classify the move BEFORE making it. Testing piece_on(m.to()) after
+        // make_move always sees the piece that just moved there, never the
+        // captured one, so the old checks were never true and both futility
+        // pruning and LMR silently never fired.
+        bool is_capture = (b.piece_on(m.to()) != NO_PIECE) || m.type() == EN_PASSANT;
+        bool is_quiet   = !is_capture && m.type() != PROMOTION;
+
+        b.make_move(m);
 
         if (b.is_attacked(b.king_square(~b.side_to_move), b.side_to_move)) {
-            b.unmake_move(scored[i].move);
+            b.unmake_move(m);
             continue;
         }
+        ++legal_moves;
+
+        // side_to_move is the opponent here, so this asks "does our move check them".
+        bool gives_check = b.in_check();
+        bool tactical = !is_quiet || gives_check;
 
         // ── Futility Pruning ──────────────────────────────────────────────
-        // At low depth, skip quiet moves if eval + margin is below alpha.
-        if (depth <= 3 && moves_searched > 0 && !in_check
-            && scored[i].move.type() != PROMOTION
-            && b.piece_on(scored[i].move.to()) == NO_PIECE)
+        // At low depth, skip quiet moves that cannot plausibly reach alpha.
+        if (depth <= 3 && moves_searched > 0 && !in_check && !tactical
+            && static_eval != SCORE_NONE
+            && static_eval + 100 * depth <= alpha)
         {
-            int futility_margin = 200 * depth;
-            int futility_eval = evaluate(b);
-            // Note: evaluate returns from side-to-move perspective (opponent after make_move)
-            // so we negate to get our perspective
-            if (-futility_eval + futility_margin < alpha) {
-                b.unmake_move(scored[i].move);
-                ++moves_searched;
-                continue;
-            }
+            b.unmake_move(m);
+            ++moves_searched;
+            continue;
         }
 
         int score;
 
-        // Late Move Reductions: reduce depth for moves sorted late that aren't tactical
-        if (moves_searched >= 4 && depth >= 3 && !in_check
-            && scored[i].move.type() != PROMOTION
-            && b.piece_on(scored[i].move.to()) == NO_PIECE
-            && !b.is_attacked(b.king_square(b.side_to_move), ~b.side_to_move))
-        {
-            score = -negamax(b, depth - 2, -alpha - 1, -alpha, ply + 1, info);
-            if (score <= alpha) {
-                b.unmake_move(scored[i].move);
-                ++moves_searched;
-                continue;
-            }
+        // Late Move Reductions: search late quiet moves shallower, then re-search
+        // at full depth if the reduced search suggests the move is actually good.
+        int reduction = 0;
+        if (moves_searched >= 4 && depth >= 3 && !in_check && !tactical) {
+            reduction = 1;
+            if (moves_searched >= 8) reduction++;
+            if (depth >= 6)          reduction++;
+            if (reduction > depth - 2) reduction = depth - 2;
         }
 
-        // PVS: full window for first move, zero window for rest
         if (moves_searched == 0) {
             score = -negamax(b, depth - 1, -beta, -alpha, ply + 1, info);
         } else {
-            score = -negamax(b, depth - 1, -alpha - 1, -alpha, ply + 1, info);
+            score = -negamax(b, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, info);
+            // A reduced search that beats alpha is not trustworthy — verify it.
+            if (reduction > 0 && score > alpha)
+                score = -negamax(b, depth - 1, -alpha - 1, -alpha, ply + 1, info);
             if (score > alpha && score < beta)
                 score = -negamax(b, depth - 1, -beta, -alpha, ply + 1, info);
         }
 
-        b.unmake_move(scored[i].move);
+        b.unmake_move(m);
         ++moves_searched;
 
+        if (score > best_score) {
+            best_score = score;
+            if (score > alpha) {
+                alpha = score;
+                best_move = m;
+                update_pv(ply, m);
+            }
+        }
+
         if (score >= beta) {
-            if (scored[i].move.type() != EN_PASSANT
-                && b.piece_on(scored[i].move.to()) == NO_PIECE)
-            {
-                update_killers(scored[i].move, ply);
-                update_history(~b.side_to_move, scored[i].move, depth);
+            if (is_quiet) {
+                update_killers(m, ply);
+                // unmake_move() already ran, so side_to_move is the side that
+                // made this move — indexing with ~side_to_move wrote the
+                // opponent's history table.
+                update_history(b.side_to_move, m, depth);
             }
             // TT store
-            tt.store(b.hash(), scored[i].move, depth, score, TT_BETA);
-            return beta;
-        }
-
-        if (score > alpha) {
-            alpha = score;
-            best_move = scored[i].move;
-            update_pv(ply, scored[i].move);
+            tt.store(b.hash(), m, depth, to_tt_score(best_score, ply), TT_BETA);
+            return best_score;
         }
     }
 
-    if (best_move.is_null()) {
-        if (in_check)
-            return -MATE_SCORE + ply;
-        else
-            return 0;
-    }
+    // Mate or stalemate — only when there was genuinely no legal move. This used
+    // to test best_move.is_null(), which is also true at every fail-low node
+    // (no move beat alpha), so such nodes returned 0 and claimed a draw.
+    if (legal_moves == 0)
+        return in_check ? -MATE_SCORE + ply : 0;
 
     // TT store
     TTFlag flag = (alpha == old_alpha) ? TT_ALPHA : TT_EXACT;
-    tt.store(b.hash(), best_move, depth, alpha, flag);
+    tt.store(b.hash(), best_move, depth, to_tt_score(best_score, ply), flag);
 
     if (ply == 0) {
         info.best_move = best_move;
@@ -406,7 +499,40 @@ int Search::negamax(Board& b, int depth, int alpha, int beta, int ply, SearchInf
             info.pv[i] = pv_table[0][i];
     }
 
-    return alpha;
+    return best_score;
+}
+
+// Returns true if `m` is fully legal in `b` (pseudo-legal *and* does not leave
+// our own king in check). MoveGen::generate is only pseudo-legal, so membership
+// in its output is not enough.
+static bool is_legal_move(Board& b, Move m) {
+    Move list[256];
+    int count = MoveGen::generate(b, list);
+    bool found = false;
+    for (int i = 0; i < count; ++i)
+        if (list[i] == m) { found = true; break; }
+    if (!found)
+        return false;
+
+    b.make_move(m);
+    bool leaves_king_in_check =
+        b.is_attacked(b.king_square(~b.side_to_move), b.side_to_move);
+    b.unmake_move(m);
+    return !leaves_king_in_check;
+}
+
+// First fully legal move in the position, or a null move if there is none.
+static Move first_legal_move(Board& b) {
+    Move list[256];
+    int count = MoveGen::generate(b, list);
+    for (int i = 0; i < count; ++i) {
+        b.make_move(list[i]);
+        bool safe = !b.is_attacked(b.king_square(~b.side_to_move), b.side_to_move);
+        b.unmake_move(list[i]);
+        if (safe)
+            return list[i];
+    }
+    return Move::null();
 }
 
 void Search::go(Board& b, const SearchLimits& lim) {
@@ -416,196 +542,90 @@ void Search::go(Board& b, const SearchLimits& lim) {
     search_start = std::chrono::steady_clock::now();
     tt.new_search();
 
-    // Initialize TT with 16MB on first use
     if (!tt.is_initialized())
         tt.resize(16);
 
+    set_time_limits(b.side_to_move, b.game_ply);
+
     SearchInfo info{};
-    Move validated_best = Move::null();
+    Move best_move = Move::null();
 
-    // ── Board integrity verification ──────────────────────────────────────────
-    // Save expected hash at start of search for corruption detection
+#ifndef NDEBUG
+    // Cheap invariant: the incremental hash must survive a whole search.
     uint64_t expected_hash = b.hash();
-    uint64_t expected_computed = b.compute_hash();
-    if (expected_hash != expected_computed) {
-        std::cerr << "HASH MISMATCH at search start: stored=0x" << std::hex << expected_hash
-                  << " computed=0x" << expected_computed << std::dec << "\n";
-        std::cerr << "  FEN: " << b.to_fen() << "\n";
-    }
-    // Save mailbox snapshot for full state comparison
-    Piece snapshot_mailbox[SQ_NB];
-    Color snapshot_side = b.side_to_move;
-    int   snapshot_ply  = b.game_ply;
-    int   snapshot_idx  = b.state_idx;
-    memcpy(snapshot_mailbox, b.mailbox, sizeof(snapshot_mailbox));
-
-    int64_t time_budget = alloc_time_ms(b.side_to_move, b.game_ply);
-    bool board_corrupted = false;
+    assert(expected_hash == b.compute_hash());
+#endif
 
     for (int d = 1; d <= limits.depth; ++d) {
         SearchInfo depth_info{};
         depth_info.depth = d;
         int score = negamax(b, d, -SCORE_INF, SCORE_INF, 0, depth_info);
 
-        // ── Board integrity check after each depth ────────────────────────────
-        // Verify the incremental hash hasn't drifted from the expected value
-        if (b.hash() != expected_hash) {
-            std::cerr << "HASH DRIFT at depth " << d
-                      << ": expected=0x" << std::hex << expected_hash
-                      << " actual=0x" << b.hash() << std::dec << "\n";
-            std::cerr << "  FEN: " << b.to_fen() << "\n";
-            board_corrupted = true;
-        }
-        // Verify incremental hash matches recomputed hash
-        uint64_t recomputed = b.compute_hash();
-        if (recomputed != b.hash()) {
-            std::cerr << "HASH INCONSISTENT at depth " << d
-                      << ": incremental=0x" << std::hex << b.hash()
-                      << " recomputed=0x" << recomputed << std::dec << "\n";
-            std::cerr << "  FEN: " << b.to_fen() << "\n";
-            board_corrupted = true;
-        }
-        // Verify mailbox snapshot matches
-        if (memcmp(b.mailbox, snapshot_mailbox, sizeof(snapshot_mailbox)) != 0
-            || b.side_to_move != snapshot_side
-            || b.game_ply != snapshot_ply
-            || b.state_idx != snapshot_idx)
-        {
-            std::cerr << "BOARD STATE DRIFT at depth " << d << "\n";
-            std::cerr << "  FEN (current):  " << b.to_fen() << "\n";
-            board_corrupted = true;
-        }
+        bool aborted = stopped.load(std::memory_order_relaxed);
 
-        // ── Validate best move with FULL legality check ───────────────────────
-        if (!depth_info.best_move.is_null() && !board_corrupted) {
-            // Full legality: make_move, check king safety, unmake_move
-            Move m = depth_info.best_move;
-            b.make_move(m);
-            bool leaves_king_in_check = b.is_attacked(
-                b.king_square(~b.side_to_move), b.side_to_move);
-            b.unmake_move(m);
+        // The root searches with a full window starting at alpha = -inf, so the
+        // first completed root move always sets best_move. That makes a non-null
+        // best_move usable even from an aborted iteration.
+        if (!depth_info.best_move.is_null())
+            best_move = depth_info.best_move;
 
-            if (!leaves_king_in_check) {
-                validated_best = depth_info.best_move;
-            } else {
-                std::cerr << "SAFETY: depth " << d << " bestmove " << m.to_string()
-                          << " leaves king in check! Searching for legal move...\n";
-                // Find first fully legal move
-                Move legal_list[256];
-                int legal_count = MoveGen::generate(b, legal_list);
-                for (int i = 0; i < legal_count; ++i) {
-                    b.make_move(legal_list[i]);
-                    bool safe = !b.is_attacked(
-                        b.king_square(~b.side_to_move), b.side_to_move);
-                    b.unmake_move(legal_list[i]);
-                    if (safe) {
-                        validated_best = legal_list[i];
-                        break;
-                    }
-                }
-            }
-        } else if (!depth_info.best_move.is_null() && board_corrupted) {
-            // Board is corrupted — find any fully legal move from current (corrupted) state
-            std::cerr << "Using fallback move due to board corruption\n";
-            Move legal_list[256];
-            int legal_count = MoveGen::generate(b, legal_list);
-            for (int i = 0; i < legal_count; ++i) {
-                b.make_move(legal_list[i]);
-                bool safe = !b.is_attacked(
-                    b.king_square(~b.side_to_move), b.side_to_move);
-                b.unmake_move(legal_list[i]);
-                if (safe) {
-                    validated_best = legal_list[i];
-                    break;
-                }
-            }
-        } else if (depth_info.pv_len > 0) {
-            validated_best = depth_info.pv[0];
-        }
-
-        if (stopped.load(std::memory_order_relaxed))
+        if (aborted)
             break;
 
         info = depth_info;
 
-        auto now = std::chrono::steady_clock::now();
-        int elapsed_ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(now - search_start).count());
-        int nps = (elapsed_ms > 0) ? int(nodes * 1000 / elapsed_ms) : 0;
+        int64_t elapsed = elapsed_ms();
+        int nps = (elapsed > 0) ? int(nodes * 1000 / elapsed) : 0;
 
-        // ── Validate PV: truncate at first illegal move ─────────────────────
+        // Truncate the reported PV at the first move that is not fully legal.
+        // Checking only pseudo-legality here is what let illegal PV moves reach
+        // the GUI.
+        int pv_len_out = 0;
         {
             Board pv_board = b;
-            int valid_len = 0;
             for (int i = 0; i < depth_info.pv_len; ++i) {
-                Move m = depth_info.pv[i];
-                Move legal_list[256];
-                int legal_count = MoveGen::generate(pv_board, legal_list);
-                bool found = false;
-                for (int j = 0; j < legal_count; ++j) {
-                    if (legal_list[j] == m) { found = true; break; }
-                }
-                if (!found) break;
-                pv_board.make_move(m);
-                valid_len++;
+                if (!is_legal_move(pv_board, depth_info.pv[i]))
+                    break;
+                pv_board.make_move(depth_info.pv[i]);
+                ++pv_len_out;
             }
-            depth_info.pv_len = valid_len;
         }
 
-        std::lock_guard<std::mutex> lock(output_mutex);
-        std::cout << "info depth " << d
-                  << " score cp " << score
-                  << " nodes " << nodes
-                  << " nps " << nps
-                  << " time " << elapsed_ms
-                  << " pv ";
-        for (int i = 0; i < depth_info.pv_len; ++i)
-            std::cout << depth_info.pv[i].to_string() << " ";
-        std::cout << "\n";
-        std::cout.flush();
+        {
+            std::lock_guard<std::mutex> lock(output_mutex);
+            std::cout << "info depth " << d
+                      << " score cp " << score
+                      << " nodes " << nodes
+                      << " nps " << nps
+                      << " time " << elapsed
+                      << " pv";
+            for (int i = 0; i < pv_len_out; ++i)
+                std::cout << " " << depth_info.pv[i].to_string();
+            std::cout << "\n";
+            std::cout.flush();
+        }
 
         if (score > MATE_THRESHOLD || score < -MATE_THRESHOLD)
             break;
 
-        if (!limits.infinite) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - search_start).count();
-            if (elapsed * 2 > time_budget)
-                break;
-        }
+        // Don't start an iteration we almost certainly cannot finish.
+        if (!limits.infinite && elapsed * 3 >= soft_limit_ms * 2)
+            break;
     }
 
-    // ── Final board integrity check ───────────────────────────────────────────
-    if (b.hash() != expected_hash || b.compute_hash() != b.hash()) {
-        std::cerr << "BOARD CORRUPTED at end of search\n";
-        std::cerr << "  Expected hash: 0x" << std::hex << expected_hash << std::dec << "\n";
-        std::cerr << "  Actual hash:   0x" << std::hex << b.hash() << std::dec << "\n";
-        std::cerr << "  FEN: " << b.to_fen() << "\n";
-        board_corrupted = true;
-    }
-    if (memcmp(b.mailbox, snapshot_mailbox, sizeof(snapshot_mailbox)) != 0) {
-        std::cerr << "MAILBOX CORRUPTED at end of search\n";
-        std::cerr << "  FEN: " << b.to_fen() << "\n";
-        board_corrupted = true;
-    }
+#ifndef NDEBUG
+    assert(b.hash() == expected_hash && "search corrupted the board");
+#endif
+
+    // A bestmove is always required, even if the search was cut off before it
+    // finished a single root move.
+    if (best_move.is_null())
+        best_move = first_legal_move(b);
 
     {
         std::lock_guard<std::mutex> lock(output_mutex);
-        Move best = validated_best;
-
-        // Final fallback: if no move was validated, use PV or generate from board
-        if (best.is_null()) {
-            if (info.pv_len > 0)
-                best = info.pv[0];
-            else {
-                Move legal_list[256];
-                int legal_count = MoveGen::generate(b, legal_list);
-                if (legal_count > 0) best = legal_list[0];
-            }
-        }
-
-        // Store validated best move
-        last_validated_bestmove = best;
-
-        std::cout << "bestmove " << best.to_string() << "\n";
+        last_validated_bestmove = best_move;
+        std::cout << "bestmove " << best_move.to_string() << "\n";
         std::cout.flush();
     }
 }

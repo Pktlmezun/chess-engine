@@ -66,6 +66,8 @@ public:
     // Attack queries
     Bitboard attackers_to(Square s, Bitboard occ) const;
     bool     is_attacked(Square s, Color by_color) const;
+    // True if the current position already occurred earlier in the game/search.
+    bool     is_repetition() const;
     bool     in_check()  const { return is_attacked(king_square(side_to_move), ~side_to_move); }
 
 private:

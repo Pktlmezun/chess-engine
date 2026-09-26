@@ -208,9 +208,40 @@ int MoveGen::generate(const Board& b, Move* list, GenType type) {
 }
 
 Move MoveGen::parse(const Board& b, const std::string& str) {
+    // Decode the coordinate notation into fields and match on those, rather than
+    // comparing against to_string() output. Comparing strings would make move
+    // parsing depend on move formatting: a bug in to_string() would silently
+    // reject the opponent's moves and desync the board from the real game.
+    if (str.size() < 4 || str.size() > 5) return Move::null();
+    if (str[0] < 'a' || str[0] > 'h' || str[2] < 'a' || str[2] > 'h') return Move::null();
+    if (str[1] < '1' || str[1] > '8' || str[3] < '1' || str[3] > '8') return Move::null();
+
+    Square from = make_square(File(str[0] - 'a'), Rank(str[1] - '1'));
+    Square to   = make_square(File(str[2] - 'a'), Rank(str[3] - '1'));
+
+    PieceType promo = NO_PIECE_TYPE;
+    if (str.size() == 5) {
+        switch (str[4]) {
+            case 'n': promo = KNIGHT; break;
+            case 'b': promo = BISHOP; break;
+            case 'r': promo = ROOK;   break;
+            case 'q': promo = QUEEN;  break;
+            default: return Move::null();
+        }
+    }
+
     Move list[256];
     int count = generate(b, list);
-    for (int i = 0; i < count; ++i)
-        if (list[i].to_string() == str) return list[i];
+    for (int i = 0; i < count; ++i) {
+        if (list[i].from() != from || list[i].to() != to) continue;
+        // A promotion is only identified by its promotion piece; for every other
+        // move type the from/to pair is unique within the generated list.
+        if (list[i].type() == PROMOTION) {
+            if (list[i].promotion() != promo) continue;
+        } else if (promo != NO_PIECE_TYPE) {
+            continue;
+        }
+        return list[i];
+    }
     return Move::null();
 }

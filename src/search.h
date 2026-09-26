@@ -13,7 +13,10 @@ struct TTEntry {
     uint64_t key;
     Move     best_move;
     int16_t  depth;
-    int16_t  score;
+    // Must be wide enough for mate scores. SCORE_MATE is 999000, which silently
+    // truncated to 15960 when this field was int16_t — below MATE_THRESHOLD, so
+    // a stored mate was read back as an ordinary +159 pawn evaluation.
+    int32_t  score;
     uint8_t  flag;
     uint8_t  age;
 };
@@ -25,6 +28,7 @@ public:
     void new_search() { ++current_age; }
 
     bool probe(uint64_t key, TTEntry& entry) const;
+    // `score` must already be normalized for ply distance (see to_tt_score).
     void store(uint64_t key, Move best_move, int depth, int score, TTFlag flag);
 
     bool is_initialized() const { return mask > 0; }
@@ -81,7 +85,14 @@ private:
     static int pv_len[MAX_PLY];
     static SearchLimits limits;
     static std::chrono::steady_clock::time_point search_start;
-    static int64_t alloc_time_ms(Color side, int game_ply);
+
+    // Time control. `soft` gates starting another iteration, `hard` aborts the
+    // search mid-node. Both already exclude the move-overhead reserve.
+    static int64_t soft_limit_ms;
+    static int64_t hard_limit_ms;
+    static void    set_time_limits(Color side, int game_ply);
+    static int64_t elapsed_ms();
+    static void    check_time();
 
     // Move ordering tables
     static Move killer_moves[MAX_PLY][2];

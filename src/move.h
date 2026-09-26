@@ -62,7 +62,12 @@ inline std::string Move::to_string() const {
         "a7","b7","c7","d7","e7","f7","g7","h7",
         "a8","b8","c8","d8","e8","f8","g8","h8"
     };
-    static const char promo_chars[] = " nbroq";
+    // Indexed by PieceType: NO_PIECE_TYPE, PAWN, KNIGHT, BISHOP, ROOK, QUEEN.
+    // The index must line up with the enum in types.h — an off-by-one here makes
+    // the engine emit move strings no GUI accepts (and forfeit the game).
+    static const char promo_chars[] = " pnbrq";
+    static_assert(sizeof(promo_chars) == QUEEN + 2,
+                  "promo_chars must be indexable by PieceType up to QUEEN");
     std::string s = sq_names[from()];
     s += sq_names[to()];
     if (type() == PROMOTION)

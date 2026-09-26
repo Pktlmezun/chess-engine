@@ -140,6 +140,22 @@ void Board::set_from_fen(const std::string& fen) {
 }
 
 // ── Recompute hash from scratch ──────────────────────────────────────────────
+// ── Repetition detection ─────────────────────────────────────────────────────
+// Scan back to the last irreversible move (rule50 reset); only every second ply
+// can repeat, since the side to move must match. A single repeat is treated as a
+// draw inside the search, which is standard and cheaper than tracking threefold.
+bool Board::is_repetition() const {
+    uint64_t key = state_stack[state_idx].hash;
+    int back = state_stack[state_idx].rule50;
+    if (back > state_idx) back = state_idx;
+
+    for (int i = state_idx - 2; i >= state_idx - back; i -= 2)
+        if (state_stack[i].hash == key)
+            return true;
+
+    return false;
+}
+
 uint64_t Board::compute_hash() const {
     uint64_t h = 0;
     for (int s = 0; s < SQ_NB; ++s) {
